@@ -1,4 +1,4 @@
-CC = gcc-4.8.1 -march=core-avx2 -O3 -ffast-math -funroll-loops -fopenmp
+CC = gcc -march=core-avx2 -O3 -ffast-math -funroll-loops -fopenmp
 CFLAGS += -DNORMAL
 #CFLAGS += -DONLYNNB
 #CFLAGS += -DONLYNEIGHBOUR

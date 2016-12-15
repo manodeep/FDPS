@@ -6,6 +6,10 @@
 #ifdef ENABLE_PHANTOM_GRAPE_X86
 #include <gp5util.h>
 #endif
+#ifdef ENABLE_GPU_CUDA
+#define MULTI_WALK
+#include"force_gpu_cuda.hpp"
+#endif
 #include "user-defined.hpp"
 
 void makeColdUniformSphere(const PS::F64 mass_glb,
@@ -156,6 +160,8 @@ void makeOutputDirectory(char * dir_name) {
     }
 }
 
+PS::F64 FPGrav::eps = 1.0/32.0;
+
 int main(int argc, char *argv[]) {
     std::cout<<std::setprecision(15);
     std::cerr<<std::setprecision(15);
@@ -190,15 +196,15 @@ int main(int argc, char *argv[]) {
             dt = atof(optarg);
             std::cerr << "time_step = " << dt << std::endl;
             break;
-	case 'd':
+        case 'd':
             dt_diag = atof(optarg);
             std::cerr << "dt_diag = " << dt_diag << std::endl;
             break;
-	case 'D':
+        case 'D':
             dt_snap = atof(optarg);
             std::cerr << "dt_snap = " << dt_snap << std::endl;
             break;
-	case 'l':
+        case 'l':
             n_leaf_limit = atoi(optarg);
             std::cerr << "n_leaf_limit = " << n_leaf_limit << std::endl;
             break;
@@ -228,14 +234,14 @@ int main(int argc, char *argv[]) {
     makeOutputDirectory(dir_name);
 
     std::ofstream fout_eng;
-    char sout_de[1024];
-    sprintf(sout_de, "%s/t-de.dat", dir_name);
-    std::cerr << sout_de << std::endl;
-    fout_eng.open(sout_de);
 
     if(PS::Comm::getRank() == 0) {
-        fprintf(stderr, "Number of processes: %d\n", PS::Comm::getNumberOfProc());
-        fprintf(stderr, "Number of threads per process: %d\n", PS::Comm::getNumberOfThread());
+        char sout_de[1024];
+	sprintf(sout_de, "%s/t-de.dat", dir_name);
+        fout_eng.open(sout_de);
+        fprintf(stdout, "This is a sample program of N-body simulation on FDPS!\n");
+        fprintf(stdout, "Number of processes: %d\n", PS::Comm::getNumberOfProc());
+        fprintf(stdout, "Number of threads per process: %d\n", PS::Comm::getNumberOfThread());
     }
 
     PS::ParticleSystem<FPGrav> system_grav;
@@ -251,8 +257,7 @@ int main(int argc, char *argv[]) {
     const PS::F32 coef_ema = 0.3;
     PS::DomainInfo dinfo;
     dinfo.initialize(coef_ema);
-    dinfo.collectSampleParticle(system_grav);
-    dinfo.decomposeDomain();
+    dinfo.decomposeDomainAll(system_grav);
     system_grav.exchangeParticle(dinfo);
     n_loc = system_grav.getNumberOfParticleLocal();
     
@@ -263,10 +268,21 @@ int main(int argc, char *argv[]) {
     
     PS::TreeForForceLong<FPGrav, FPGrav, FPGrav>::Monopole tree_grav;
     tree_grav.initialize(n_tot, theta, n_leaf_limit, n_group_limit);
+#ifdef MULTI_WALK
+    const PS::S32 n_walk_limit = 200;
+    const PS::S32 tag_max = 1;
+    tree_grav.calcForceAllAndWriteBackMultiWalk(DispatchKernelWithSP,
+                                                RetrieveKernel,
+                                                tag_max,
+                                                system_grav,
+                                                dinfo,
+                                                n_walk_limit);
+#else
     tree_grav.calcForceAllAndWriteBack(CalcGravity<FPGrav>,
                                        CalcGravity<PS::SPJMonopole>,
                                        system_grav,
                                        dinfo);
+#endif
     PS::F64 Epot0, Ekin0, Etot0, Epot1, Ekin1, Etot1;
     calcEnergy(system_grav, Etot0, Ekin0, Epot0);
     PS::F64 time_diag = 0.0;
@@ -289,7 +305,7 @@ int main(int argc, char *argv[]) {
         if(PS::Comm::getRank() == 0){
             if( (time_sys >= time_diag) || ( (time_sys + dt) - time_diag ) > (time_diag - time_sys) ){
                 fout_eng << time_sys << "   " << (Etot1 - Etot0) / Etot0 << std::endl;
-                fprintf(stderr, "time: %10.7f energy error: %+e\n",
+                fprintf(stdout, "time: %10.7f energy error: %+e\n",
                         time_sys, (Etot1 - Etot0) / Etot0);
                 time_diag += dt_diag;
             }            
@@ -306,11 +322,20 @@ int main(int argc, char *argv[]) {
         }
         
         system_grav.exchangeParticle(dinfo);
-    
+#ifdef MULTI_WALK
+        tree_grav.calcForceAllAndWriteBackMultiWalk(DispatchKernelWithSP,
+                                                    RetrieveKernel,
+                                                    tag_max,
+                                                    system_grav,
+                                                    dinfo,
+                                                    n_walk_limit,
+                                                    true);
+#else
         tree_grav.calcForceAllAndWriteBack(CalcGravity<FPGrav>,
                                            CalcGravity<PS::SPJMonopole>,
                                            system_grav,
                                            dinfo);
+#endif
         
         kick(system_grav, dt * 0.5);
         

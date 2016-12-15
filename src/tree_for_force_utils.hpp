@@ -4,6 +4,8 @@
 #include<emmintrin.h>
 #endif
 
+#include"stack.hpp"
+
 namespace ParticleSimulator{
     inline void CalcNumberAndShiftOfImageDomain
     (ReallocatableArray<F64vec> & shift_image_domain,
@@ -288,7 +290,9 @@ namespace ParticleSimulator{
             S32 n_cell_new = 0;
             // assign particles to child cells and count # of particles in child cells
             // but loop over parent cells because they have indexes of particles
+#ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL
 #pragma omp parallel for reduction(+: n_cell_new)
+#endif
             for(S32 i=id_cell_left; i<id_cell_right+1; i++){
                 const S32 n_ptcl_tmp = tc_array[i].n_ptcl_;
                 if(n_ptcl_tmp <= n_leaf_limit) continue;
@@ -436,7 +440,9 @@ namespace ParticleSimulator{
         for(S32 i=lev_max; i>=0; --i){
             const S32 head = adr_tc_level_partition[i];
             const S32 next = adr_tc_level_partition[i+1];
+#ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL	    
 #pragma omp parallel for
+#endif
             for(S32 j=head; j<next; j++){
                 Ttc * tc_tmp = tc + j;
                 const int n_tmp = tc_tmp->n_ptcl_;
@@ -521,7 +527,9 @@ namespace ParticleSimulator{
         for(S32 i=lev_max; i>=0; --i){
             const S32 head = adr_tc_level_partition[i];
             const S32 next = adr_tc_level_partition[i+1];
+#ifdef PARTICLE_SIMULATOR_THREAD_PARALLEL	    
 #pragma omp parallel for
+#endif
             for(S32 j=head; j<next; j++){
                 Ttc * tc_tmp = tc + j;
                 const int n_tmp = tc_tmp->n_ptcl_;
@@ -564,63 +572,6 @@ namespace ParticleSimulator{
         }
     }
 
-/*
-// the same as CalcMomentLongGlobalTree
-    template<class Ttc, class Tepj, class Tspj>
-    inline void CalcMomentLongCutoffGlobalTree(S32 adr_tc_level_partition[], 
-                                               Ttc tc[],
-                                               TreeParticle tp[],
-                                               Tepj epj[],
-                                               Tspj spj[],
-                                               const S32 lev_max,
-                                               const S32 n_leaf_limit){
-        for(S32 i=lev_max; i>=0; --i){
-            const S32 head = adr_tc_level_partition[i];
-            const S32 next = adr_tc_level_partition[i+1];
-#pragma omp parallel for
-            for(S32 j=head; j<next; j++){
-                Ttc * tc_tmp = tc + j;
-                const int n_tmp = tc_tmp->n_ptcl_;
-                tc_tmp->mom_.init();
-                if( n_tmp == 0) continue;
-                else if(tc_tmp->isLeaf(n_leaf_limit)){
-                    const S32 adr = tc_tmp->adr_ptcl_;
-                    for(S32 k=adr; k<adr+n_tmp; k++){
-                        if( GetMSB(tp[k].adr_ptcl_) == 0 ){
-                            tc_tmp->mom_.accumulateAtLeaf(epj[k]);
-                        }
-                        else{
-                            tc_tmp->mom_.accumulate(spj[k].convertToMoment());
-                        }
-                    }
-                    tc_tmp->mom_.set();
-                    for(S32 k=adr; k<adr+n_tmp; k++){
-                        if( GetMSB(tp[k].adr_ptcl_) == 0 ){
-                            tc_tmp->mom_.accumulateAtLeaf2(epj[k]);
-                        }
-                        else{
-                            tc_tmp->mom_.accumulate2(spj[k].convertToMoment());
-                        }
-                    }
-                }
-                else{
-                    for(S32 k=0; k<N_CHILDREN; k++){
-                        Ttc * tc_tmp_tmp = tc + ((tc_tmp->adr_tc_)+k);
-                        if(tc_tmp_tmp->n_ptcl_ == 0) continue;
-                        tc_tmp->mom_.accumulate( tc_tmp_tmp->mom_ );
-                    }
-                    tc_tmp->mom_.set();
-                    for(S32 k=0; k<N_CHILDREN; k++){
-                        Ttc * tc_tmp_tmp = tc + ((tc_tmp->adr_tc_)+k);
-                        if(tc_tmp_tmp->n_ptcl_ == 0) continue;
-                        tc_tmp->mom_.accumulate2( tc_tmp_tmp->mom_ );
-                    }
-                }
-            }
-        }
-    }
-*/
-    
     template<class Tipg, class Ttc, class Tepi>
     inline void MakeIPGroupLong(ReallocatableArray<Tipg> & ipg_first,
                                 const ReallocatableArray<Ttc> & tc_first,
@@ -633,7 +584,7 @@ namespace ParticleSimulator{
         else if( tc_tmp->isLeaf(n_grp_limit) ){
             ipg_first.increaseSize();
             ipg_first.back().copyFromTC(*tc_tmp);
-            ipg_first.back().vertex_ = GetMinBoxSingleThread(epi_first.data()+(tc_tmp->adr_ptcl_), n_tmp);
+	    //ipg_first.back().vertex_ = GetMinBoxSingleThread(epi_first.data()+(tc_tmp->adr_ptcl_), n_tmp);
             return;
         }
         else{
@@ -645,7 +596,41 @@ namespace ParticleSimulator{
         }
     }
 
-  // NOTE: This FUnction must be used after calc moment of global tree
+
+  // NOTE: This FUnction mimic sirial code 
+    template<class Tipg, class Ttcloc, class Ttcglb, class Tepj>
+    inline void MakeIPGroupLongGLBTreeCellAsIPGBox(ReallocatableArray<Tipg> & ipg_first,
+						   const ReallocatableArray<Ttcloc> & tc_loc_first,
+						   const ReallocatableArray<Ttcglb> & tc_glb_first,
+						   const ReallocatableArray<Tepj> & epj_first,
+						   const S32 adr_tc_loc,
+						   const S32 adr_tc_glb,
+						   const S32 n_grp_limit,
+						   const S32 n_leaf_limit){
+        const Ttcloc * tc_loc_tmp = tc_loc_first.getPointer(adr_tc_loc);
+        const Ttcglb * tc_glb_tmp = tc_glb_first.getPointer(adr_tc_glb);
+        const S32 n_loc_tmp = tc_loc_tmp->n_ptcl_;
+        const S32 n_glb_tmp = tc_glb_tmp->n_ptcl_;
+        if(n_loc_tmp == 0 || n_glb_tmp == 0) return;
+        else if( tc_glb_tmp->isLeaf(n_grp_limit) || tc_loc_tmp->isLeaf(n_leaf_limit)){
+            ipg_first.increaseSize();
+            ipg_first.back().copyFromTC(*tc_loc_tmp);
+	    const S32 adr_tmp = tc_glb_tmp->adr_ptcl_;
+	    ipg_first.back().vertex_ = GetMinBoxSingleThread(epj_first.getPointer(adr_tmp), n_glb_tmp);
+            return;
+        }
+        else{
+            S32 adr_tc_loc_tmp = tc_loc_tmp->adr_tc_;
+            S32 adr_tc_glb_tmp = tc_glb_tmp->adr_tc_;
+            for(S32 i=0; i<N_CHILDREN; i++){
+                MakeIPGroupLongGLBTreeCellAsIPGBox
+		  (ipg_first, tc_loc_first, tc_glb_first, epj_first, 
+		   adr_tc_loc_tmp+i, adr_tc_glb_tmp+i, n_grp_limit, n_leaf_limit);
+            }
+        }
+    }
+    //#endif
+
     template<class Tipg, class Ttcloc, class Ttcglb, class Tepi>
     inline void MakeIPGroupUseGLBTreeLong(ReallocatableArray<Tipg> & ipg_first,
 					  const ReallocatableArray<Ttcloc> & tc_loc_first,
@@ -659,21 +644,12 @@ namespace ParticleSimulator{
         const Ttcglb * tc_glb_tmp = tc_glb_first.getPointer(adr_tc_glb);
         const S32 n_loc_tmp = tc_loc_tmp->n_ptcl_;
         const S32 n_glb_tmp = tc_glb_tmp->n_ptcl_;
-	/*
-	if(n_glb_tmp < n_loc_tmp){
-	  std::cout<<"n_loc_tmp="<<n_loc_tmp<<std::endl;
-	  std::cout<<"tc_loc_tmp.level_="<<tc_loc_tmp->level_<<std::endl;
-	  std::cout<<"n_glb_tmp="<<n_glb_tmp<<std::endl;
-	  std::cout<<"tc_glb_tmp.level_="<<tc_glb_tmp->level_<<std::endl;
-	}
-	assert(n_glb_tmp >= n_loc_tmp);
-	*/
         if(n_loc_tmp == 0 || n_glb_tmp == 0) return;
         else if( tc_glb_tmp->isLeaf(n_grp_limit) || tc_loc_tmp->isLeaf(n_leaf_limit)){
             ipg_first.increaseSize();
             ipg_first.back().copyFromTC(*tc_loc_tmp);
-	    const S32 adr_tmp = tc_loc_tmp->adr_ptcl_;
-	    ipg_first.back().vertex_ = GetMinBoxSingleThread(epi_first.getPointer(adr_tmp), n_loc_tmp);
+	    //const S32 adr_tmp = tc_loc_tmp->adr_ptcl_;
+	    //ipg_first.back().vertex_ = GetMinBoxSingleThread(epi_first.getPointer(adr_tmp), n_loc_tmp);
             return;
         }
         else{
@@ -959,10 +935,18 @@ namespace ParticleSimulator{
             if(n_child == 0) continue;
             else if( (open_bits>>i) & 0x1 ){
                 if( !(tc_child->isLeaf(n_leaf_limit)) ){
+		    //#ifdef DEBUG_1028
+#ifdef PARTICLE_SIMULATOR_EXCHANGE_LET_ALL
+                    SearchSendParticleLong<Ttc, Tep>
+                        (tc_first,   tc_first[adr_tc_child].adr_tc_, ep_first,
+                         id_ep_send, id_sp_send, pos_target_box,
+                         r_crit_sq, n_leaf_limit);
+#else
                     SearchSendParticleLong<Ttc, Tep>
                         (tc_first,   tc_first[adr_tc_child].adr_tc_, ep_first,
                          id_ep_send, id_sp_send, pos_target_box,
                          r_crit_sq*0.25, n_leaf_limit);
+#endif
                 }
                 else{
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
@@ -1005,10 +989,20 @@ namespace ParticleSimulator{
             if(n_child == 0) continue;
             else if( (open_bits>>i) & 0x1 ){
                 if( !(tc_child->isLeaf(n_leaf_limit)) ){
+		    //#ifdef DEBUG_1023
+#ifdef PARTICLE_SIMULATOR_EXCHANGE_LET_ALL
+
+                    SearchSendParticleLongScatter<Ttc, Tep>
+                        (tc_first,   tc_first[adr_tc_child].adr_tc_, ep_first,
+                         id_ep_send, id_sp_send, pos_target_box,
+                         r_crit_sq, n_leaf_limit);
+#else
+
                     SearchSendParticleLongScatter<Ttc, Tep>
                         (tc_first,   tc_first[adr_tc_child].adr_tc_, ep_first,
                          id_ep_send, id_sp_send, pos_target_box,
                          r_crit_sq*0.25, n_leaf_limit);
+#endif
                 }
                 else{
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
@@ -1144,6 +1138,71 @@ namespace ParticleSimulator{
             }
         }
     }
+
+
+
+    template<class Ttc, class Tep, class Tsp>
+    inline void SearchSendParticleLongCutoffWithRootCellCheck
+    (const ReallocatableArray<Ttc> & tc_first,
+     const S32 adr_tc,
+     const ReallocatableArray<Tep> & ep_first,
+     ReallocatableArray<Tep> & ep_send,
+     ReallocatableArray<Tsp> & sp_send,
+     const F64ort & cell_box,
+     const F64ort & pos_target_domain,
+     const F64 r_crit_sq,
+     const F64 r_cut_sq,
+     const S32 n_leaf_limit,
+     const F64ort pos_root_cell,
+     const F64vec & shift = 0.){
+        U32 open_bits = 0;
+        for(S32 i=0; i<N_CHILDREN; i++){
+            F64vec pos_tmp = tc_first[adr_tc+i].mom_.getPos();
+            open_bits |= ( (pos_target_domain.getDistanceMinSQ(pos_tmp) <= r_crit_sq) << i); // using opening criterion
+#if 0
+            // vertex_out is not used. 
+            const F64ort child_cell_box = makeChildCellBox(i, cell_box);
+            open_bits |= ( (pos_target_domain.getDistanceMinSQ(child_cell_box) <= r_cut_sq) << (i + N_CHILDREN) ); // using cutoff criterion
+#else
+            // cell_box is not neede
+            open_bits |= (pos_target_domain.overlapped( tc_first[adr_tc+i].mom_.getVertexOut() ) << (i + N_CHILDREN) );
+#endif
+        }
+        for(S32 i=0; i<N_CHILDREN; i++){
+            if( ( (open_bits >> (i+N_CHILDREN)) & 0x1 ) ^ 0x1 ) continue;
+            const S32 adr_tc_child = adr_tc + i;
+            Ttc * tc_child = tc_first.getPointer(adr_tc_child);
+            const S32 n_child = tc_child->n_ptcl_;
+            if(n_child == 0) continue;
+            else if( (open_bits>>i) & 0x1 ){
+                if( !(tc_child->isLeaf(n_leaf_limit)) ){
+                    const F64ort child_cell_box = makeChildCellBox(i, cell_box);
+                    SearchSendParticleLongCutoffWithRootCellCheck<Ttc, Tep, Tsp>
+                        (tc_first, tc_first[adr_tc_child].adr_tc_,
+                         ep_first, ep_send, sp_send, child_cell_box,
+                         pos_target_domain, r_crit_sq*0.25, r_cut_sq, n_leaf_limit,
+                         pos_root_cell, shift);
+                }
+                else{
+                    S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
+                    //ep_send.reserve( ep_send.size()+n_child );
+                    ep_send.reserveEmptyAreaAtLeast( n_child );
+                    for(S32 ip=0; ip<n_child; ip++){
+                        ep_send.pushBackNoCheck(ep_first[adr_ptcl_tmp++]);
+                        const F64vec pos_new = ep_send.back().getPos() + shift;
+                        ep_send.back().setPos(pos_new);
+                    }
+                }
+            }
+            else{
+                //sp_send.resizeNoInitialize(sp_send.size()+1);
+                sp_send.increaseSize();
+                sp_send.back().copyFromMoment(tc_child->mom_);
+                const F64vec pos_new = sp_send.back().getPos() + shift;
+                sp_send.back().setPos(pos_new);
+            }
+        }
+    }    
     
     /////////////////////////////
     /// MAKE INTERACTION LIST ///
@@ -1230,10 +1289,18 @@ namespace ParticleSimulator{
             if(n_child == 0) continue;
             else if( (open_bits>>i) & 0x1 ){
                 if( !(tc_child->isLeaf(n_leaf_limit)) ){
+		    //#ifdef DEBUG_1028_2
+#ifdef PARTICLE_SIMULATOR_INTERACTION_LIST_ALL
+                    MakeInteractionListLongEPSP<Ttc, Ttp, Tep, Tsp>
+                        (tc_first, tc_first[adr_tc_child].adr_tc_, tp_first, ep_first, 
+                         ep_list,   sp_first, sp_list, 
+                         pos_target_box, r_crit_sq, n_leaf_limit);
+#else
                     MakeInteractionListLongEPSP<Ttc, Ttp, Tep, Tsp>
                         (tc_first, tc_first[adr_tc_child].adr_tc_, tp_first, ep_first, 
                          ep_list,   sp_first, sp_list, 
                          pos_target_box, r_crit_sq*0.25, n_leaf_limit);
+#endif
                 }
                 else{
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
@@ -1309,6 +1376,72 @@ namespace ParticleSimulator{
         }
     }
 #endif
+
+
+    /*
+    template<class Ttc, class Ttp, class Tep, class Tsp>
+    void MakeInteractionListLongEPSPMultiWalk(const ReallocatableArray<Ttc> & tc_first,
+					      const S32 adr_tc,
+					      const ReallocatableArray<Ttp> & tp_first,
+					      const ReallocatableArray<Tep> & ep_first,
+					      ReallocatableArray<Tep> & ep_list,
+					      const ReallocatableArray<Tsp> & sp_first,
+					      ReallocatableArray<Tsp> & sp_list,
+					      const F64ort & pos_target_box,
+					      const F64 r_crit_sq,
+					      const S32 n_leaf_limit){
+
+
+	MakeInteractionListLongEPSP(tc_first,
+				    adr_tc,
+				    tp_first,
+				    ep_first,
+				    ep_list,
+				    sp_first,
+				    sp_list,
+				    pos_target_box,
+				    r_crit_sq,
+				    n_leaf_limit);
+
+        U32 open_bits = 0;
+        for(S32 i=0; i<N_CHILDREN; i++){
+            const F64vec pos_tmp = tc_first[adr_tc+i].mom_.getPos();
+            open_bits |= ( (pos_target_box.getDistanceMinSQ(pos_tmp) <= r_crit_sq) << i);
+        }
+        for(S32 i=0; i<N_CHILDREN; i++){
+            const S32 adr_tc_child = adr_tc + i;
+            const Ttc * tc_child = tc_first.getPointer(adr_tc_child);
+            const S32 n_child = tc_child->n_ptcl_;
+            if(n_child == 0) continue;
+            else if( (open_bits>>i) & 0x1 ){
+                if( !(tc_child->isLeaf(n_leaf_limit)) ){
+                    MakeInteractionListLongEPSP<Ttc, Ttp, Tep, Tsp>
+                        (tc_first, tc_first[adr_tc_child].adr_tc_, tp_first, ep_first, 
+                         ep_list,   sp_first, sp_list, 
+                         pos_target_box, r_crit_sq*0.25, n_leaf_limit);
+                }
+                else{
+                    S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
+                    ep_list.reserveEmptyAreaAtLeast( n_child );
+                    sp_list.reserveEmptyAreaAtLeast( n_child );
+                    for(S32 ip=0; ip<n_child; ip++){
+                        if( GetMSB(tp_first[adr_ptcl_tmp].adr_ptcl_) == 0){
+                            ep_list.pushBackNoCheck(ep_first[adr_ptcl_tmp++]);
+                        }
+                        else{
+                            sp_list.pushBackNoCheck(sp_first[adr_ptcl_tmp++]);
+                        }
+                    }
+                }
+            }
+            else{
+                sp_list.increaseSize();
+                sp_list.back().copyFromMoment(tc_child->mom_);
+            }
+        }
+    }
+    */
+
     template<class Ttc, class Ttp, class Tep, class Tsp>
     void MakeInteractionListLongScatterEPSP(const ReallocatableArray<Ttc> & tc_first,
                                             const S32 adr_tc,
@@ -1337,10 +1470,18 @@ namespace ParticleSimulator{
             if(n_child == 0) continue;
             else if( (open_bits>>i) & 0x1 ){
                 if( !(tc_child->isLeaf(n_leaf_limit)) ){
+		    //#ifdef DEBUG_1023_2
+#ifdef PARTICLE_SIMULATOR_INTERACTION_LIST_ALL
+                    MakeInteractionListLongScatterEPSP<Ttc, Ttp, Tep, Tsp>
+                        (tc_first, tc_first[adr_tc_child].adr_tc_, tp_first, ep_first, 
+                         ep_list,   sp_first, sp_list, 
+                         pos_target_box, r_crit_sq, n_leaf_limit);
+#else
                     MakeInteractionListLongScatterEPSP<Ttc, Ttp, Tep, Tsp>
                         (tc_first, tc_first[adr_tc_child].adr_tc_, tp_first, ep_first, 
                          ep_list,   sp_first, sp_list, 
                          pos_target_box, r_crit_sq*0.25, n_leaf_limit);
+#endif
                 }
                 else{
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
@@ -1362,7 +1503,6 @@ namespace ParticleSimulator{
             }
         }
     }
-
 
     template<class Ttc, class Ttp, class Tep, class Tsp>
     void MakeInteractionListLongCutoffEPSP(const ReallocatableArray<Ttc> & tc_first,
@@ -1432,6 +1572,9 @@ namespace ParticleSimulator{
     }
 
 
+    
+
+
     template<class Ttc, class Tep2, class Tep3>
     inline void MakeListUsingOuterBoundary(const Ttc * tc_first,
                                            const S32 adr_tc,
@@ -1441,44 +1584,30 @@ namespace ParticleSimulator{
                                            const S32 n_leaf_limit,
                                            const F64vec & shift = F64vec(0.0) ){
         U32 open_bits = 0;
-        //std::cout<<"CHECK 0 pos_target_box="<<pos_target_box<<std::endl;
-        //std::cout<<"CHECK 0 adr_tc="<<adr_tc<<std::endl;
         for(S32 i=0; i<N_CHILDREN; i++){
             open_bits |= (pos_target_box.overlapped( tc_first[adr_tc+i].mom_.getVertexOut() ) << i);
-            //std::cout<<"CHECK 0 tc_first[adr_tc+i].mom_.getVertexOut()="<<tc_first[adr_tc+i].mom_.getVertexOut()<<std::endl;
         }
-
-        //std::cout<<"CHECK 0 open_bits="<<open_bits<<std::endl;
         for(S32 i=0; i<N_CHILDREN; i++){
             if( (open_bits>>i) & 0x1){
-                //std::cout<<"CHECK A i="<<i<<std::endl;
                 const S32 adr_tc_child = adr_tc + i;
                 const Ttc * tc_child = tc_first + adr_tc_child;
                 const S32 n_child = tc_child->n_ptcl_;
                 if(n_child == 0) continue;
                 if( !(tc_child->isLeaf(n_leaf_limit)) ){
-                    //std::cout<<"CHECK B n_child="<<n_child<<std::endl;
                     MakeListUsingOuterBoundary<Ttc, Tep2, Tep3>
                         (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, ep_list,
                          pos_target_box, n_leaf_limit, shift);
                 }
                 else{
-                    //std::cout<<"CHECK C tc_child->adr_ptcl_="<<tc_child->adr_ptcl_<<std::endl;
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
-                    //ep_list.reserve( ep_list.size()+n_child );
                     ep_list.reserveEmptyAreaAtLeast( n_child );
                     for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
 #ifdef ORIGINAL_SCATTER_MODE
                         const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
                         const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
                         const F64 dis_sq_tmp = pos_target_box.getDistanceMinSQ(pos_tmp);
-                        //std::cout<<"CHECK D pos_tmp="<<pos_tmp<<std::endl;
-                        //std::cout<<"CHECK D size_tmp="<<size_tmp<<std::endl;
-                        //std::cout<<"CHECK D pos_target_box="<<pos_target_box<<std::endl;
-                        //std::cout<<"CHECK D dis_sq_tmp="<<dis_sq_tmp<<std::endl;
                         if(dis_sq_tmp > size_tmp*size_tmp) continue;
 #endif
-                        //std::cout<<"CHECK E"<<std::endl;
                         ep_list.increaseSize();
                         ep_list.back() = ep_first[adr_ptcl_tmp];
                         const F64vec pos_new = ep_list.back().getPos() + shift;
@@ -1489,69 +1618,52 @@ namespace ParticleSimulator{
         }
     }
 
-
-/*
-    template<class Ttc, class Tep2, class Tep3, class Tep4>
-    inline void MakeListUsingOuterBoundaryForGather(const Ttc * tc_first,
-                                                    const S32 adr_tc,
-                                                    const Tep2 * ep_first,
-                                                    ReallocatableArray<Tep3> & ep_list,
-                                                    ReallocatableArray<EPXROnly> & ep_x_r_list,
-                                                    const F64ort & pos_target_box, // position of domain
-                                                    const S32 n_leaf_limit,
-                                                    const Tep4 * epi_first,
-                                                    const F64vec & shift = F64vec(0.0) ){
+    template<class Ttc, class Tep2, class Tep3>
+    inline void MakeListUsingOuterBoundaryWithRootCellCheck
+    (const Ttc * tc_first,
+     const S32 adr_tc,
+     const Tep2 * ep_first,
+     ReallocatableArray<Tep3> & ep_list,
+     const F64ort & pos_target_box, // position of domain
+     const S32 n_leaf_limit,
+     const F64ort pos_root_cell,
+     const F64vec & shift = F64vec(0.0) ){
         U32 open_bits = 0;
-        //std::cout<<"CHECK 0 pos_target_box="<<pos_target_box<<std::endl;
-        //std::cout<<"CHECK 0 adr_tc="<<adr_tc<<std::endl;
         for(S32 i=0; i<N_CHILDREN; i++){
             open_bits |= (pos_target_box.overlapped( tc_first[adr_tc+i].mom_.getVertexOut() ) << i);
-            //std::cout<<"CHECK 0 tc_first[adr_tc+i].mom_.getVertexOut()="<<tc_first[adr_tc+i].mom_.getVertexOut()<<std::endl;
         }
-
-        //std::cout<<"CHECK 0 open_bits="<<open_bits<<std::endl;
         for(S32 i=0; i<N_CHILDREN; i++){
             if( (open_bits>>i) & 0x1){
-                //std::cout<<"CHECK A i="<<i<<std::endl;
                 const S32 adr_tc_child = adr_tc + i;
                 const Ttc * tc_child = tc_first + adr_tc_child;
                 const S32 n_child = tc_child->n_ptcl_;
                 if(n_child == 0) continue;
                 if( !(tc_child->isLeaf(n_leaf_limit)) ){
-                    //std::cout<<"CHECK B n_child="<<n_child<<std::endl;
-                    MakeListUsingOuterBoundaryForGather<Ttc, Tep2, Tep3>
-                        (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, ep_list, ep_x_r_list,
-                         pos_target_box, n_leaf_limit, epi_first, shift);
+                    MakeListUsingOuterBoundaryWithRootCellCheck<Ttc, Tep2, Tep3>
+                        (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, ep_list,
+                         pos_target_box, n_leaf_limit, pos_root_cell, shift);
                 }
                 else{
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
                     ep_list.reserveEmptyAreaAtLeast( n_child );
-                    ep_x_r_list.reserveEmptyAreaAtLeast( n_child );
                     for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
-                        const F64vec pos_tmp = epi_first[adr_ptcl_tmp].getPos();
-                        const F64 size_tmp = epi_first[adr_ptcl_tmp].getRSearch();
+#ifdef ORIGINAL_SCATTER_MODE
+                        const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
+                        const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
                         const F64 dis_sq_tmp = pos_target_box.getDistanceMinSQ(pos_tmp);
-                        //std::cout<<"CHECK D pos_tmp="<<pos_tmp<<std::endl;
-                        //std::cout<<"CHECK D size_tmp="<<size_tmp<<std::endl;
-                        //std::cout<<"CHECK D pos_target_box="<<pos_target_box<<std::endl;
-                        //std::cout<<"CHECK D dis_sq_tmp="<<dis_sq_tmp<<std::endl;
                         if(dis_sq_tmp > size_tmp*size_tmp) continue;
-                        //std::cout<<"CHECK E"<<std::endl;
+#endif
+                        if( pos_root_cell.notOverlapped(pos_tmp+shift) ) continue;  // add M.I. 2016/03/12
                         ep_list.increaseSize();
                         ep_list.back() = ep_first[adr_ptcl_tmp];
                         const F64vec pos_new = ep_list.back().getPos() + shift;
                         ep_list.back().setPos(pos_new);
-                        ep_x_r_list.increaseSize();
-                        ep_x_r_list.back().copyFromEP(epi_first[adr_ptcl_tmp]);
-                        ep_x_r_list.back().setPos(pos_new);
                     }
                 }
             }
         }
     }
-*/
 
-    // NEW functions for 
     template<class Ttc, class Tep2, class Tep3>
     inline void MakeListUsingOuterBoundaryAndInnerBoundary(const Ttc * tc_first,
                                                            const S32 adr_tc,
@@ -1561,29 +1673,137 @@ namespace ParticleSimulator{
                                                            const F64ort & pos_target_box_in, // position of domain
                                                            const S32 n_leaf_limit,
                                                            const F64vec & shift = F64vec(0.0) ){
-        U32 open_bits = 0;
         asm("# MakeListUsingOuterBoundaryAndInnerBoundary");
+#ifdef FAST_WALK_K
+        static const _fjsp_v2r8 ONE = _fjsp_set_v2r8(1.0, 1.0);
+        F64 open_mask[N_CHILDREN];
+        const _fjsp_v2r8 xi_h_in = _fjsp_set_v2r8(pos_target_box_in.high_.x, pos_target_box_in.high_.x);
+        const _fjsp_v2r8 xi_l_in = _fjsp_set_v2r8(pos_target_box_in.low_.x, pos_target_box_in.low_.x);
+        const _fjsp_v2r8 yi_h_in = _fjsp_set_v2r8(pos_target_box_in.high_.y, pos_target_box_in.high_.y);
+        const _fjsp_v2r8 yi_l_in = _fjsp_set_v2r8(pos_target_box_in.low_.y, pos_target_box_in.low_.y);
+        const _fjsp_v2r8 zi_h_in = _fjsp_set_v2r8(pos_target_box_in.high_.z, pos_target_box_in.high_.z);
+        const _fjsp_v2r8 zi_l_in = _fjsp_set_v2r8(pos_target_box_in.low_.z, pos_target_box_in.low_.z);
+
+        const _fjsp_v2r8 xi_h_out = _fjsp_set_v2r8(pos_target_box_out.high_.x, pos_target_box_out.high_.x);
+        const _fjsp_v2r8 xi_l_out = _fjsp_set_v2r8(pos_target_box_out.low_.x, pos_target_box_out.low_.x);
+        const _fjsp_v2r8 yi_h_out = _fjsp_set_v2r8(pos_target_box_out.high_.y, pos_target_box_out.high_.y);
+        const _fjsp_v2r8 yi_l_out = _fjsp_set_v2r8(pos_target_box_out.low_.y, pos_target_box_out.low_.y);
+        const _fjsp_v2r8 zi_h_out = _fjsp_set_v2r8(pos_target_box_out.high_.z, pos_target_box_out.high_.z);
+        const _fjsp_v2r8 zi_l_out = _fjsp_set_v2r8(pos_target_box_out.low_.z, pos_target_box_out.low_.z);
+        for(S32 i=0; i<N_CHILDREN/4; i++){
+            const S32 i0 = i*4;
+            const S32 i1 = i*4+1;
+            const S32 i2 = i*4+2;
+            const S32 i3 = i*4+3;
+            const F64ort mom0_in = tc_first[adr_tc+i0].mom_.getVertexIn();
+            const F64ort mom0_out = tc_first[adr_tc+i0].mom_.getVertexOut();
+            const F64ort mom1_in = tc_first[adr_tc+i1].mom_.getVertexIn();
+            const F64ort mom1_out = tc_first[adr_tc+i1].mom_.getVertexOut();
+            const F64ort mom2_in = tc_first[adr_tc+i2].mom_.getVertexIn();
+            const F64ort mom2_out = tc_first[adr_tc+i2].mom_.getVertexOut();
+            const F64ort mom3_in = tc_first[adr_tc+i3].mom_.getVertexIn();
+            const F64ort mom3_out = tc_first[adr_tc+i3].mom_.getVertexOut();
+
+            const _fjsp_v2r8 xj_h_in_a = _fjsp_set_v2r8(mom0_in.high_.x,   mom1_in.high_.x);
+            const _fjsp_v2r8 xj_l_in_a = _fjsp_set_v2r8(mom0_in.low_.x,    mom1_in.low_.x);
+            const _fjsp_v2r8 xj_h_in_b = _fjsp_set_v2r8(mom2_in.high_.x,   mom3_in.high_.x);
+            const _fjsp_v2r8 xj_l_in_b = _fjsp_set_v2r8(mom2_in.low_.x,    mom3_in.low_.x);
+            const _fjsp_v2r8 xj_h_out_a = _fjsp_set_v2r8(mom0_out.high_.x, mom1_out.high_.x);
+            const _fjsp_v2r8 xj_l_out_a = _fjsp_set_v2r8(mom0_out.low_.x,  mom1_out.low_.x);
+            const _fjsp_v2r8 xj_h_out_b = _fjsp_set_v2r8(mom2_out.high_.x, mom3_out.high_.x);
+            const _fjsp_v2r8 xj_l_out_b = _fjsp_set_v2r8(mom2_out.low_.x,  mom3_out.low_.x);
+
+
+
+            const _fjsp_v2r8 yj_h_in_a = _fjsp_set_v2r8(mom0_in.high_.y,   mom1_in.high_.y);
+            const _fjsp_v2r8 yj_l_in_a = _fjsp_set_v2r8(mom0_in.low_.y,    mom1_in.low_.y);
+            const _fjsp_v2r8 yj_h_in_b = _fjsp_set_v2r8(mom2_in.high_.y,   mom3_in.high_.y);
+            const _fjsp_v2r8 yj_l_in_b = _fjsp_set_v2r8(mom2_in.low_.y,    mom3_in.low_.y);
+            const _fjsp_v2r8 yj_h_out_a = _fjsp_set_v2r8(mom0_out.high_.y, mom1_out.high_.y);
+            const _fjsp_v2r8 yj_l_out_a = _fjsp_set_v2r8(mom0_out.low_.y,  mom1_out.low_.y);
+            const _fjsp_v2r8 yj_h_out_b = _fjsp_set_v2r8(mom2_out.high_.y, mom3_out.high_.y);
+            const _fjsp_v2r8 yj_l_out_b = _fjsp_set_v2r8(mom2_out.low_.y,  mom3_out.low_.y);
+
+            const _fjsp_v2r8 zj_h_in_a = _fjsp_set_v2r8(mom0_in.high_.z,   mom1_in.high_.z);
+            const _fjsp_v2r8 zj_l_in_a = _fjsp_set_v2r8(mom0_in.low_.z,    mom1_in.low_.z);
+            const _fjsp_v2r8 zj_h_in_b = _fjsp_set_v2r8(mom2_in.high_.z,   mom3_in.high_.z);
+            const _fjsp_v2r8 zj_l_in_b = _fjsp_set_v2r8(mom2_in.low_.z,    mom3_in.low_.z);
+            const _fjsp_v2r8 zj_h_out_a = _fjsp_set_v2r8(mom0_out.high_.z, mom1_out.high_.z);
+            const _fjsp_v2r8 zj_l_out_a = _fjsp_set_v2r8(mom0_out.low_.z,  mom1_out.low_.z);
+            const _fjsp_v2r8 zj_h_out_b = _fjsp_set_v2r8(mom2_out.high_.z, mom3_out.high_.z);
+            const _fjsp_v2r8 zj_l_out_b = _fjsp_set_v2r8(mom2_out.low_.z,  mom3_out.low_.z);
+
+
+            const _fjsp_v2r8 mask_x_io_ji_a = _fjsp_and_v2r8( _fjsp_cmple_v2r8(xi_l_out, xj_h_in_a), _fjsp_cmple_v2r8(xj_l_in_a, xi_h_out) );  // i:out, j:in
+            const _fjsp_v2r8 mask_x_io_ji_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(xi_l_out, xj_h_in_b), _fjsp_cmple_v2r8(xj_l_in_b, xi_h_out) ); 
+            const _fjsp_v2r8 mask_x_ii_jo_a = _fjsp_and_v2r8( _fjsp_cmple_v2r8(xi_l_in, xj_h_out_a), _fjsp_cmple_v2r8(xj_l_out_a, xi_h_in) );  // i:in, j:out
+            const _fjsp_v2r8 mask_x_ii_jo_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(xi_l_in, xj_h_out_b), _fjsp_cmple_v2r8(xj_l_out_b, xi_h_in) ); 
+
+            const _fjsp_v2r8 mask_y_io_ji_a = _fjsp_and_v2r8( _fjsp_cmple_v2r8(yi_l_out, yj_h_in_a), _fjsp_cmple_v2r8(yj_l_in_a, yi_h_out) );  // i:out, j:in
+            const _fjsp_v2r8 mask_y_io_ji_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(yi_l_out, yj_h_in_b), _fjsp_cmple_v2r8(yj_l_in_b, yi_h_out) ); 
+            const _fjsp_v2r8 mask_y_ii_jo_a = _fjsp_and_v2r8( _fjsp_cmple_v2r8(yi_l_in, yj_h_out_a), _fjsp_cmple_v2r8(yj_l_out_a, yi_h_in) );  // i:in, j:out
+            const _fjsp_v2r8 mask_y_ii_jo_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(yi_l_in, yj_h_out_b), _fjsp_cmple_v2r8(yj_l_out_b, yi_h_in) ); 
+
+            const _fjsp_v2r8 mask_z_io_ji_a = _fjsp_and_v2r8( _fjsp_cmple_v2r8(zi_l_out, zj_h_in_a), _fjsp_cmple_v2r8(zj_l_in_a, zi_h_out) );  // i:out, j:in
+            const _fjsp_v2r8 mask_z_io_ji_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(zi_l_out, zj_h_in_b), _fjsp_cmple_v2r8(zj_l_in_b, zi_h_out) ); 
+            const _fjsp_v2r8 mask_z_ii_jo_a = _fjsp_and_v2r8( _fjsp_cmple_v2r8(zi_l_in, zj_h_out_a), _fjsp_cmple_v2r8(zj_l_out_a, zi_h_in) );  // i:in, j:out
+            const _fjsp_v2r8 mask_z_ii_jo_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(zi_l_in, zj_h_out_b), _fjsp_cmple_v2r8(zj_l_out_b, zi_h_in) ); 
+
+            const _fjsp_v2r8 mask_tmp_a = 
+            _fjsp_and_v2r8( 
+                _fjsp_or_v2r8( 
+                    _fjsp_and_v2r8(mask_x_io_ji_a, _fjsp_and_v2r8(mask_y_io_ji_a, mask_z_io_ji_a)),
+                    _fjsp_and_v2r8(mask_x_ii_jo_a, _fjsp_and_v2r8(mask_y_ii_jo_a, mask_z_ii_jo_a))
+                    )
+                , ONE);
+
+            const _fjsp_v2r8 mask_tmp_b = 
+            _fjsp_and_v2r8( 
+                _fjsp_or_v2r8( 
+                    _fjsp_and_v2r8(mask_x_io_ji_b, _fjsp_and_v2r8(mask_y_io_ji_b, mask_z_io_ji_b)),
+                    _fjsp_and_v2r8(mask_x_ii_jo_b, _fjsp_and_v2r8(mask_y_ii_jo_b, mask_z_ii_jo_b))
+                    )
+                , ONE);
+            _fjsp_storeh_v2r8(open_mask+i0, mask_tmp_a);
+            _fjsp_storel_v2r8(open_mask+i1, mask_tmp_a);
+            _fjsp_storeh_v2r8(open_mask+i2, mask_tmp_b);
+            _fjsp_storel_v2r8(open_mask+i3, mask_tmp_b);
+        }
+#else //FAST_WALK_K
+        U32 open_bits = 0;
         for(S32 i=0; i<N_CHILDREN; i++){
             open_bits |= ( (pos_target_box_out.overlapped( tc_first[adr_tc+i].mom_.getVertexIn() ) 
                             || pos_target_box_in.overlapped( tc_first[adr_tc+i].mom_.getVertexOut() ) )
                            << i);
         }
+#endif //FAST_WALK_K
+        Ttc tc_child[N_CHILDREN];
         for(S32 i=0; i<N_CHILDREN; i++){
+            tc_child[i] = tc_first[adr_tc+i];
+        }
+        for(S32 i=0; i<N_CHILDREN; i++){
+#ifdef FAST_WALK_K
+            if( open_mask[i] == 1.0){
+#else
             if( (open_bits>>i) & 0x1){
-                const S32 adr_tc_child = adr_tc + i;
-                const Ttc * tc_child = tc_first + adr_tc_child;
-                const S32 n_child = tc_child->n_ptcl_;
+#endif
+                const S32 n_child = tc_child[i].n_ptcl_;
                 if(n_child == 0) continue;
-                if( !(tc_child->isLeaf(n_leaf_limit)) ){
+                if( !(tc_child[i].isLeaf(n_leaf_limit)) ){
                     MakeListUsingOuterBoundaryAndInnerBoundary<Ttc, Tep2, Tep3>
-                        (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, ep_list,
+                        (tc_first, tc_child[i].adr_tc_, ep_first, ep_list,
                          pos_target_box_out, pos_target_box_in, n_leaf_limit, shift);
                 }
                 else{
-                    S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
-                    //ep_list.reserve( ep_list.size()+n_child );
+                    S32 adr_ptcl_tmp = tc_child[i].adr_ptcl_;
                     ep_list.reserveEmptyAreaAtLeast( n_child );
                     for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+#if 1
+                        ep_list.increaseSize();
+                        ep_list.back() = ep_first[adr_ptcl_tmp];
+                        const F64vec pos_new = ep_list.back().getPos() + shift;
+                        ep_list.back().setPos(pos_new);
+#else
                         const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
                         const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
                         const F64 dis_sq_tmp = pos_target_box_in.getDistanceMinSQ(pos_tmp);
@@ -1592,6 +1812,7 @@ namespace ParticleSimulator{
                         ep_list.back() = ep_first[adr_ptcl_tmp];
                         const F64vec pos_new = ep_list.back().getPos() + shift;
                         ep_list.back().setPos(pos_new);
+#endif
                     }
                 }
             }
@@ -1606,44 +1827,70 @@ namespace ParticleSimulator{
                                            const F64ort & pos_target_box, // position of domain
                                            const S32 n_leaf_limit,
                                            const F64vec & shift = F64vec(0.0) ){
-        U32 open_bits = 0;
-        asm("# MakeListUsingInnerBoundary");
-#if 0
-//const F64ort vertex0 = 
-        __builtin_v2r8 top_x, top_y, top_z, bot_x, bot_y, bot_z;
-        __builtin_fj_storel_v2r8(&pos_target_box.low_.x, bot_x);
-        __builtin_fj_storeh_v2r8(&pos_target_box.low_.x, bot_x);
-        __builtin_fj_storel_v2r8(&pos_target_box.low_.y, bot_y);
-        __builtin_fj_storeh_v2r8(&pos_target_box.low_.y, bot_y);
-        __builtin_fj_storel_v2r8(&pos_target_box.low_.z, bot_z);
-        __builtin_fj_storeh_v2r8(&pos_target_box.low_.z, bot_z);
-        __builtin_fj_storel_v2r8(&pos_target_box.high_.x, top_x);
-        __builtin_fj_storeh_v2r8(&pos_target_box.high_.x, top_x);
-        __builtin_fj_storel_v2r8(&pos_target_box.high_.y, top_y);
-        __builtin_fj_storeh_v2r8(&pos_target_box.high_.y, top_y);
-        __builtin_fj_storel_v2r8(&pos_target_box.high_.z, top_z);
-        __builtin_fj_storeh_v2r8(&pos_target_box.high_.z, top_z);
-        __builtin_v2r8 top_x0, top_y0, top_z0, bot_x0, bot_y0, bot_z0;
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+0].mom_.getVertexIn().low_.x, bot_x0);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+0].mom_.getVertexIn().low_.y, bot_y0);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+0].mom_.getVertexIn().low_.z, bot_z0);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+0].mom_.getVertexIn().high_.x, top_x0);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+0].mom_.getVertexIn().high_.y, top_y0);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+0].mom_.getVertexIn().high_.z, top_z0);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+1].mom_.getVertexIn().low_.x, bot_x1);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+1].mom_.getVertexIn().low_.y, bot_y1);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+1].mom_.getVertexIn().low_.z, bot_z1);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+1].mom_.getVertexIn().high_.x, top_x1);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+1].mom_.getVertexIn().high_.y, top_y1);
-        __builtin_fj_storel_v2r8(&tc_first[adr_tc+1].mom_.getVertexIn().high_.z, top_z1);
 
-#else
+        asm("# MakeListUsingInnerBoundary");
+#ifdef FAST_WALK_K
+        static const _fjsp_v2r8 ONE = _fjsp_set_v2r8(1.0, 1.0);
+        F64 open_mask[N_CHILDREN];
+        const _fjsp_v2r8 xi_h = _fjsp_set_v2r8(pos_target_box.high_.x, pos_target_box.high_.x);
+        const _fjsp_v2r8 xi_l = _fjsp_set_v2r8(pos_target_box.low_.x, pos_target_box.low_.x);
+        const _fjsp_v2r8 yi_h = _fjsp_set_v2r8(pos_target_box.high_.y, pos_target_box.high_.y);
+        const _fjsp_v2r8 yi_l = _fjsp_set_v2r8(pos_target_box.low_.y, pos_target_box.low_.y);
+        const _fjsp_v2r8 zi_h = _fjsp_set_v2r8(pos_target_box.high_.z, pos_target_box.high_.z);
+        const _fjsp_v2r8 zi_l = _fjsp_set_v2r8(pos_target_box.low_.z, pos_target_box.low_.z);
+        for(S32 i=0; i<N_CHILDREN/4; i++){
+            const S32 i0 = i*4;
+            const F64ort mom0 = tc_first[adr_tc+i0].mom_.getVertexIn();
+            const S32 i1 = i*4+1;
+            const F64ort mom1 = tc_first[adr_tc+i1].mom_.getVertexIn();
+            const S32 i2 = i*4+2;
+            const F64ort mom2 = tc_first[adr_tc+i2].mom_.getVertexIn();
+            const S32 i3 = i*4+3;
+            const F64ort mom3 = tc_first[adr_tc+i3].mom_.getVertexIn();
+
+            const _fjsp_v2r8 xj_h = _fjsp_set_v2r8(mom0.high_.x, mom1.high_.x);
+            const _fjsp_v2r8 xj_l = _fjsp_set_v2r8(mom0.low_.x, mom1.low_.x);
+            const _fjsp_v2r8 xj_h_b = _fjsp_set_v2r8(mom2.high_.x, mom3.high_.x);
+            const _fjsp_v2r8 xj_l_b = _fjsp_set_v2r8(mom2.low_.x, mom3.low_.x);
+            const _fjsp_v2r8 mask_x = _fjsp_and_v2r8( _fjsp_cmple_v2r8(xi_l, xj_h), _fjsp_cmple_v2r8(xj_l, xi_h) ); 
+            const _fjsp_v2r8 mask_x_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(xi_l, xj_h_b), _fjsp_cmple_v2r8(xj_l_b, xi_h) ); 
+
+            const _fjsp_v2r8 yj_h = _fjsp_set_v2r8(mom0.high_.y, mom1.high_.y);
+            const _fjsp_v2r8 yj_l = _fjsp_set_v2r8(mom0.low_.y, mom1.low_.y);
+            const _fjsp_v2r8 yj_h_b = _fjsp_set_v2r8(mom2.high_.y, mom3.high_.y);
+            const _fjsp_v2r8 yj_l_b = _fjsp_set_v2r8(mom2.low_.y, mom3.low_.y);
+            const _fjsp_v2r8 mask_y = _fjsp_and_v2r8( _fjsp_cmple_v2r8(yi_l, yj_h), _fjsp_cmple_v2r8(yj_l, yi_h) );
+            const _fjsp_v2r8 mask_y_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(yi_l, yj_h_b), _fjsp_cmple_v2r8(yj_l_b, yi_h) );
+
+            const _fjsp_v2r8 zj_h = _fjsp_set_v2r8(mom0.high_.z, mom1.high_.z);
+            const _fjsp_v2r8 zj_l = _fjsp_set_v2r8(mom0.low_.z, mom1.low_.z);
+            const _fjsp_v2r8 zj_h_b = _fjsp_set_v2r8(mom2.high_.z, mom3.high_.z);
+            const _fjsp_v2r8 zj_l_b = _fjsp_set_v2r8(mom2.low_.z, mom3.low_.z);
+            const _fjsp_v2r8 mask_z = _fjsp_and_v2r8( _fjsp_cmple_v2r8(zi_l, zj_h), _fjsp_cmple_v2r8(zj_l, zi_h) );
+            const _fjsp_v2r8 mask_z_b = _fjsp_and_v2r8( _fjsp_cmple_v2r8(zi_l, zj_h_b), _fjsp_cmple_v2r8(zj_l_b, zi_h) );
+
+            // 1;open(go deeper), 0:not open
+            const _fjsp_v2r8 mask_tmp_a = _fjsp_and_v2r8( _fjsp_and_v2r8(mask_x, _fjsp_and_v2r8(mask_y, mask_z)), ONE);
+            const _fjsp_v2r8 mask_tmp_b = _fjsp_and_v2r8( _fjsp_and_v2r8(mask_x_b, _fjsp_and_v2r8(mask_y_b, mask_z_b)), ONE);
+            _fjsp_storeh_v2r8(open_mask+i0, mask_tmp_a);
+            _fjsp_storel_v2r8(open_mask+i1, mask_tmp_a);
+            _fjsp_storeh_v2r8(open_mask+i2, mask_tmp_b);
+            _fjsp_storel_v2r8(open_mask+i3, mask_tmp_b);
+
+        }
+
+#else //FAST_WALK_K
+        U32 open_bits = 0;
         for(S32 i=0; i<N_CHILDREN; i++){
             open_bits |= (pos_target_box.overlapped( tc_first[adr_tc+i].mom_.getVertexIn() ) << i);
         }
-#endif
+#endif //FAST_WALK_K
         for(S32 i=0; i<N_CHILDREN; i++){
+#ifdef FAST_WALK_K
+            if( open_mask[i] == 1.0){
+#else
             if( (open_bits>>i) & 0x1){
+#endif
                 const S32 adr_tc_child = adr_tc + i;
                 const Ttc * tc_child = tc_first + adr_tc_child;
                 const S32 n_child = tc_child->n_ptcl_;
@@ -1667,132 +1914,6 @@ namespace ParticleSimulator{
          }
     }
 
-/*
-    template<class Ttc, class Tep>
-    inline void MakeListUsingInnerBoundaryForGatherModeNormalMode
-    (const Ttc * tc_first,
-     const S32 adr_tc,
-     const Tep * ep_first,
-     ReallocatableArray<S32> & id_send,
-     const F64ort & pos_box_target,
-     const S32 n_leaf_limit){
-        U32 open_bits = 0;
-        for(S32 i=0; i<N_CHILDREN; i++){
-            open_bits |= (tc_first[adr_tc+i].mom_.getVertexIn().overlapped(pos_box_target) << i);
-        }
-         for(S32 i=0; i<N_CHILDREN; i++){
-             if( (open_bits>>i) & 0x1){
-                 const S32 adr_tc_child = adr_tc + i;
-                 const Ttc * tc_child = tc_first + adr_tc_child;
-                 const S32 n_child = tc_child->n_ptcl_;
-                 if(n_child == 0) continue;
-                 else{
-                     if( !(tc_child->isLeaf(n_leaf_limit)) ){
-                         MakeListUsingInnerBoundaryForGatherModeNormalMode<Ttc, Tep>
-                             (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, id_send,
-                              pos_box_target, n_leaf_limit);
-                     }
-                     else{
-                         //id_send.reserve( id_send.size()+n_child );
-                         id_send.reserveEmptyAreaAtLeast( n_child );
-                         S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
-                         for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
-                             const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
-                             if(pos_box_target.overlapped(pos_tmp)){
-                                 id_send.pushBackNoCheck(adr_ptcl_tmp);
-                             }
-                         }
-                     }
-                 }
-             }
-         }
-    }
-*/
-/*
-    template<class Ttc, class Tep>
-    inline void MakeListUsingInnerBoundaryForSymmetryExclusive
-    (const Ttc * tc_first,
-     const S32 adr_tc,
-     const Tep * ep_first,
-     ReallocatableArray<S32> & id_send,
-     const F64ort & pos_box_target,
-     const F64ort & pos_domain,
-     const S32 n_leaf_limit){
-        U32 open_bits = 0;
-        for(S32 i=0; i<N_CHILDREN; i++){
-            open_bits |= (tc_first[adr_tc+i].mom_.getVertexIn().overlapped(pos_box_target) << i);
-        }
-        for(S32 i=0; i<N_CHILDREN; i++){
-            if( (open_bits>>i) & 0x1){
-                const S32 adr_tc_child = adr_tc + i;
-                const Ttc * tc_child = tc_first + adr_tc_child;
-                const S32 n_child = tc_child->n_ptcl_;
-                if(n_child == 0) continue;
-                if( !(tc_child->isLeaf(n_leaf_limit)) ){
-                    MakeListUsingInnerBoundaryForSymmetryExclusive<Ttc, Tep>
-                        (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, id_send, 
-                         pos_box_target, pos_domain, n_leaf_limit);
-                }
-                else{
-                    //id_send.reserve( id_send.size()+n_child );
-                    id_send.reserveEmptyAreaAtLeast( n_child );
-                    S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
-                    for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
-                        // NOTE: need to be concistent with MakeListUsingOuterBoundary()
-                        const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
-                        
-                        const F64 len_sq = ep_first[adr_ptcl_tmp].getRSearch() * ep_first[adr_ptcl_tmp].getRSearch();
-                        const F64 dis_sq0 = pos_box_target.getDistanceMinSQ(pos_tmp);
-                        const F64 dis_sq1 = pos_domain.getDistanceMinSQ(pos_tmp);
-                        if(dis_sq0 <= len_sq && dis_sq1 > len_sq){ id_send.pushBackNoCheck(adr_ptcl_tmp); }
-                    }
-                }
-            }
-        }
-    }
-*/
-/*
-    template<class Ttc, class Tep>
-    inline void MakeListUsingInnerBoundaryForSymmetryExclusiveSetFlag
-    (const Ttc * tc_first,
-     const S32 adr_tc,
-     const Tep * ep_first,
-     ReallocatableArray<bool> & flag_send,
-     const F64ort & pos_box_target,
-     const F64ort & pos_domain,
-     const S32 n_leaf_limit){
-        U32 open_bits = 0;
-        for(S32 i=0; i<N_CHILDREN; i++){
-            open_bits |= (tc_first[adr_tc+i].mom_.getVertexIn().overlapped(pos_box_target) << i);
-        }
-        for(S32 i=0; i<N_CHILDREN; i++){
-            if( (open_bits>>i) & 0x1){
-                const S32 adr_tc_child = adr_tc + i;
-                const Ttc * tc_child = tc_first + adr_tc_child;
-                const S32 n_child = tc_child->n_ptcl_;
-                if(n_child == 0) continue;
-                if( !(tc_child->isLeaf(n_leaf_limit)) ){
-                    MakeListUsingInnerBoundaryForSymmetryExclusiveSetFlag<Ttc, Tep>
-                        (tc_first, tc_first[adr_tc_child].adr_tc_, ep_first, flag_send, 
-                         pos_box_target, pos_domain, n_leaf_limit);
-                }
-                else{
-                    S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
-                    for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
-                        // NOTE: need to be concistent with MakeListUsingOuterBoundary()
-                        const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
-                        const F64 len_sq = ep_first[adr_ptcl_tmp].getRSearch() * ep_first[adr_ptcl_tmp].getRSearch();
-                        const F64 dis_sq0 = pos_box_target.getDistanceMinSQ(pos_tmp);
-                        const F64 dis_sq1 = pos_domain.getDistanceMinSQ(pos_tmp);
-                        if(dis_sq0 <= len_sq && dis_sq1 > len_sq){
-                            flag_send[adr_ptcl_tmp] = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
-*/
     template<class Ttc>
     inline void IsOverlappedUsingOuterBoundaryOfTreeImpl(const Ttc * tc_first,
 							 const S32 adr_tc,
@@ -1886,7 +2007,7 @@ namespace ParticleSimulator{
                     S32 adr_ptcl_tmp = tc_child->adr_ptcl_;
                     for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
 #ifdef ORIGINAL_SCATTER_MODE
-                        // NOTE: need to be concistent with MakeListUsingOuterBoundary()
+                        // NOTE: need to be consistent with MakeListUsingOuterBoundary()
                         const F64vec pos_tmp = ep_first_B[adr_ptcl_tmp].getPos();
                         const F64 len_sq = ep_first_B[adr_ptcl_tmp].getRSearch() * ep_first_B[adr_ptcl_tmp].getRSearch();
                         const F64 dis_sq = pos_domain.getDistanceMinSQ(pos_tmp);
@@ -1928,7 +2049,7 @@ namespace ParticleSimulator{
                 S32 adr_ptcl_tmp = tc_first_B->adr_ptcl_;
                 const S32 n_child = tc_first_B->n_ptcl_;
                 for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
-                    // NOTE: need to be concistent with MakeListUsingOuterBoundary()
+                    // NOTE: need to be consistent with MakeListUsingOuterBoundary()
 #ifdef ORIGINAL_SCATTER_MODE
                     const F64vec pos_tmp = ep_first_B[adr_ptcl_tmp].getPos();
                     const F64 len_sq = ep_first_B[adr_ptcl_tmp].getRSearch() * ep_first_B[adr_ptcl_tmp].getRSearch();
@@ -1943,7 +2064,7 @@ namespace ParticleSimulator{
         }
     }
 
-#if 1
+#if 0
 // for neighbour search
     template<class Tvec, class Ttc, class Ttp, class Tep>
     inline void SearchNeighborListOneParticleScatter(const Tvec & pos_target,
@@ -1983,8 +2104,6 @@ namespace ParticleSimulator{
 			}
 		    }
 		    */
-
-
 		    //assert(err < 2);
                 }
             }
@@ -2003,6 +2122,47 @@ namespace ParticleSimulator{
                     SearchNeighborListOneParticleScatter
                         (pos_target, tc_first, tp_first,    adr_tc_child+i,
                          ep_first,   ep_list,  n_leaf_limit, error);
+                }
+            }
+        }
+    }
+#else
+    // add 2016 2/5
+    // for neighbour search
+    template<class Tvec, class Ttc, class Ttp, class Tep>
+    inline void SearchNeighborListOneParticleScatter(const Tvec & pos_target,
+                                                     const Ttc * tc_first,
+                                                     const Ttp * tp_first,
+                                                     const S32 adr_tc,
+                                                     const ReallocatableArray<Tep> & ep_first,
+                                                     ReallocatableArray<Tep> & ep_list,
+                                                     const S32 n_leaf_limit){
+        if( tc_first[adr_tc].isLeaf(n_leaf_limit) ){
+            const S32 n_tmp = tc_first[adr_tc].n_ptcl_;
+            S32 adr_ptcl_tmp = tc_first[adr_tc].adr_ptcl_;
+            for(S32 ip=0; ip<n_tmp; ip++, adr_ptcl_tmp++){
+                const F64vec dr = ep_first[adr_ptcl_tmp].getPos() - pos_target;
+                const F64 r_search = ep_first[adr_ptcl_tmp].getRSearch();
+                if( GetMSB(tp_first[adr_ptcl_tmp].adr_ptcl_)==0 && dr*dr < r_search*r_search){
+                    //ep_list.pushBackNoCheck( ep_first[adr_ptcl_tmp] );
+		    ep_list.push_back( ep_first[adr_ptcl_tmp] );
+                }
+            }
+        }
+        else{
+            const S32 adr_tc_child = tc_first[adr_tc].adr_tc_;
+            U32 open_bits = 0;
+            for(S32 i=0; i<N_CHILDREN; i++){
+                const F64ort vertex_cell = tc_first[adr_tc_child+i].mom_.getVertexOut();
+                open_bits |= vertex_cell.overlapped(pos_target) << i;
+            }
+            for(S32 i=0; i<N_CHILDREN; i++){
+                const S32 n_child = tc_first[adr_tc_child+i].n_ptcl_;
+                if( n_child == 0 ) continue;
+                else if( (open_bits >> i) & 0x1 ){
+                    SearchNeighborListOneParticleScatter
+                        (pos_target, tc_first, tp_first,    adr_tc_child+i,
+                         ep_first,   ep_list,  n_leaf_limit);
                 }
             }
         }
@@ -2044,4 +2204,499 @@ namespace ParticleSimulator{
         }
     }
 #endif
+
+#if 0
+    template<class Ttc, class Tep2, class Tep3>
+    inline CountT MakeListUsingOuterBoundaryAndInnerBoundaryIteration
+        (const Ttc * tc_first,
+         const S32 adr_tc,
+         const Tep2 * ep_first,
+         ReallocatableArray<Tep3> & ep_list,
+         const F64ort & pos_target_box_out, // position of domain
+         const F64ort & pos_target_box_in, // position of domain
+         const S32 n_leaf_limit,
+         const F64vec & shift = F64vec(0.0) ){
+        CountT n_cell_open = 0;
+
+        if( tc_first[adr_tc].n_ptcl_ == 0) return n_cell_open;
+        else if( tc_first[adr_tc].isLeaf(n_leaf_limit) ){
+            S32 adr_ptcl_tmp = tc_first[adr_tc].adr_ptcl_;
+            const S32 n_child = tc_first[adr_tc].n_ptcl_;
+            for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+#if 1
+                ep_list.increaseSize();
+                ep_list.back() = ep_first[adr_ptcl_tmp];
+                const F64vec pos_new = ep_list.back().getPos() + shift;
+                ep_list.back().setPos(pos_new);
+#else
+                const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
+                const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
+                const F64 dis_sq_tmp = pos_target_box_in.getDistanceMinSQ(pos_tmp);
+                if( pos_target_box_out.notOverlapped(pos_tmp) && dis_sq_tmp > size_tmp*size_tmp) continue;
+                ep_list.increaseSize();
+                ep_list.back() = ep_first[adr_ptcl_tmp];
+                const F64vec pos_new = ep_list.back().getPos() + shift;
+                ep_list.back().setPos(pos_new);
+#endif
+            }
+            return n_cell_open;
+        }
+
+        //static __thread Stack<S32, 1000> adr_tc_stack;
+	Stack<S32> adr_tc_stack;
+        adr_tc_stack.init();
+        adr_tc_stack.push(tc_first[adr_tc].adr_tc_);  // push first child
+        while( !adr_tc_stack.empty() ){
+            n_cell_open++;
+            S32 adr_tc_curr = adr_tc_stack.pop();
+            U32 open_bits = 0;
+            for(S32 i=0; i<N_CHILDREN; i++){
+                open_bits |= ( (pos_target_box_out.overlapped( tc_first[adr_tc_curr+i].mom_.getVertexIn() ) 
+                                || pos_target_box_in.overlapped( tc_first[adr_tc_curr+i].mom_.getVertexOut() ) )
+                               << i);
+            }
+            for(S32 i=0; i<N_CHILDREN; i++){
+                //const Ttc * tc_curr = tc_first.getPointer(adr_tc_curr+i);
+                const Ttc * tc_curr = tc_first+(adr_tc_curr+i);
+                const S32 n_child = tc_curr->n_ptcl_;
+                if( (open_bits>>i) & 0x1){
+                    if(n_child == 0) continue;
+                    else if( !(tc_curr->isLeaf(n_leaf_limit)) ){
+                        adr_tc_stack.push( tc_curr->adr_tc_ );
+                    }
+                    else{
+                        S32 adr_ptcl_tmp = tc_curr->adr_ptcl_;
+                        ep_list.reserveEmptyAreaAtLeast( n_child );
+                        for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+#if 1
+                            ep_list.increaseSize();
+                            ep_list.back() = ep_first[adr_ptcl_tmp];
+                            const F64vec pos_new = ep_list.back().getPos() + shift;
+                            ep_list.back().setPos(pos_new);
+#else
+                            const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
+                            const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
+                            const F64 dis_sq_tmp = pos_target_box_in.getDistanceMinSQ(pos_tmp);
+                            if( pos_target_box_out.notOverlapped(pos_tmp) && dis_sq_tmp > size_tmp*size_tmp) continue;
+                            ep_list.increaseSize();
+                            ep_list.back() = ep_first[adr_ptcl_tmp];
+                            const F64vec pos_new = ep_list.back().getPos() + shift;
+                            ep_list.back().setPos(pos_new);
+#endif
+                        }
+                    }
+                }
+            }
+        }
+        return n_cell_open;
+    }
+
+#else
+    template<class Ttc, class Tep2, class Tep3>
+    inline CountT MakeListUsingOuterBoundaryAndInnerBoundaryIteration
+        (const Ttc * tc_first,
+         const S32 adr_tc,
+         const Tep2 * ep_first,
+         ReallocatableArray<Tep3> & ep_list,
+         const F64ort & pos_target_box_out, // position of domain
+         const F64ort & pos_target_box_in, // position of domain
+         const S32 n_leaf_limit,
+         const F64vec & shift = F64vec(0.0) ){
+        CountT n_cell_open = 0;
+        //static __thread Stack<S32, 1000> adr_tc_stack;
+	Stack<S32> adr_tc_stack;
+        adr_tc_stack.init();
+        adr_tc_stack.push(adr_tc);  // push root cell
+        while( !adr_tc_stack.empty() ){
+            n_cell_open++;
+            S32 adr_tc_curr = adr_tc_stack.pop();
+            if( tc_first[adr_tc_curr].isLeaf(n_leaf_limit) ){
+                // leaf
+                const S32 n_child = tc_first[adr_tc_curr].n_ptcl_;
+                S32 adr_ptcl_tmp = tc_first[adr_tc_curr].adr_ptcl_;
+                for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+#if 1
+                    ep_list.increaseSize();
+                    ep_list.back() = ep_first[adr_ptcl_tmp];
+                    const F64vec pos_new = ep_list.back().getPos() + shift;
+                    ep_list.back().setPos(pos_new);
+#else
+                    const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
+                    const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
+                    const F64 dis_sq_tmp = pos_target_box_in.getDistanceMinSQ(pos_tmp);
+                    if( pos_target_box_out.notOverlapped(pos_tmp) && dis_sq_tmp > size_tmp*size_tmp) continue;
+                    ep_list.increaseSize();
+                    ep_list.back() = ep_first[adr_ptcl_tmp];
+                    const F64vec pos_new = ep_list.back().getPos() + shift;
+                    ep_list.back().setPos(pos_new);
+#endif
+                }
+            }
+            else{
+                // not leaf
+                S32 adr_tc_child = tc_first[adr_tc_curr].adr_tc_;
+                for(S32 i=0; i<N_CHILDREN; i++, adr_tc_child++){
+                    if( pos_target_box_out.overlapped(tc_first[adr_tc_child].mom_.getVertexIn()) 
+                        || pos_target_box_in.overlapped(tc_first[adr_tc_child].mom_.getVertexOut()) ){
+                        adr_tc_stack.push(adr_tc_child);
+                    }
+                }
+            }
+        }
+        return n_cell_open;
+    }
+#endif
+
+    template<class Ttc, class Tep2, class Tep3>
+    inline CountT MakeListUsingInnerBoundaryIteration
+        (const Ttc * tc_first,
+         const S32 adr_tc,
+         const Tep2 * ep_first,
+         ReallocatableArray<Tep3> & ep_list,
+         const F64ort & pos_target_box, // position of domain
+         const S32 n_leaf_limit,
+         const F64vec & shift = F64vec(0.0) ){
+        asm("# MakeListUsingInnerBoundaryIteration");
+        CountT n_cell_open = 0;
+        //static __thread Stack<S32, 1000> adr_tc_stack;
+	Stack<S32> adr_tc_stack;
+        adr_tc_stack.init();
+        adr_tc_stack.push(adr_tc);  // push root cell
+        while( !adr_tc_stack.empty() ){
+            n_cell_open++;
+            S32 adr_tc_curr = adr_tc_stack.pop();
+            if( tc_first[adr_tc_curr].isLeaf(n_leaf_limit) ){
+                const S32 n_child = tc_first[adr_tc_curr].n_ptcl_;
+                ep_list.reserveEmptyAreaAtLeast( n_child );
+                U32 adr_ptcl_tmp = tc_first[adr_tc_curr].adr_ptcl_;
+                for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+                    ep_list.pushBackNoCheck(ep_first[adr_ptcl_tmp]);
+                    const F64vec pos_new = ep_first[adr_ptcl_tmp].getPos() + shift; // for periodic mode
+                    ep_list.back().setPos(pos_new);
+                }
+            }
+            else{
+                S32 adr_tc_child = tc_first[adr_tc_curr].adr_tc_;
+                for(S32 i=0; i<N_CHILDREN; i++, adr_tc_child++){
+                    if( pos_target_box.overlapped( tc_first[adr_tc_child].mom_.getVertexIn()) ){
+                        adr_tc_stack.push(adr_tc_child);
+                    }
+                }
+            }
+        }
+        return n_cell_open;
+    }
+
+
+    template<class Ttc, class Tep2, class Tep3>
+    inline void MakeListUsingOuterBoundaryIteration
+        (const Ttc * tc_first,
+         const S32 adr_tc,
+         const Tep2 * ep_first,
+         ReallocatableArray<Tep3> & ep_list,
+         const F64ort & pos_target_box, // position of domain
+         const S32 n_leaf_limit,
+         const F64vec & shift = F64vec(0.0) ){
+        CountT n_cell_open = 0;
+        //static __thread Stack<S32, 1000> adr_tc_stack;
+	Stack<S32> adr_tc_stack;
+        adr_tc_stack.init();
+        adr_tc_stack.push(adr_tc);  // push root cell
+        while( !adr_tc_stack.empty() ){
+            n_cell_open++;
+            S32 adr_tc_curr = adr_tc_stack.pop();
+            if( tc_first[adr_tc_curr].isLeaf(n_leaf_limit) ){
+                const S32 n_child = tc_first[adr_tc_curr].n_ptcl_;
+                ep_list.reserveEmptyAreaAtLeast( n_child );
+                U32 adr_ptcl_tmp = tc_first[adr_tc_curr].adr_ptcl_;
+                for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+#ifdef ORIGINAL_SCATTER_MODE
+                    const F64vec pos_tmp = ep_first[adr_ptcl_tmp].getPos();
+                    const F64 size_tmp = ep_first[adr_ptcl_tmp].getRSearch();
+                    const F64 dis_sq_tmp = pos_target_box.getDistanceMinSQ(pos_tmp);
+                    if(dis_sq_tmp > size_tmp*size_tmp) continue;
+#endif
+                    ep_list.increaseSize();
+                    ep_list.back() = ep_first[adr_ptcl_tmp];
+                    const F64vec pos_new = ep_list.back().getPos() + shift;
+                    ep_list.back().setPos(pos_new);
+                }
+            }
+            else{
+                S32 adr_tc_child = tc_first[adr_tc_curr].adr_tc_;
+                for(S32 i=0; i<N_CHILDREN; i++, adr_tc_child++){
+                    if( pos_target_box.overlapped( tc_first[adr_tc_child].mom_.getVertexOut()) ){
+                        adr_tc_stack.push(adr_tc_child);
+                    }
+                }
+            }
+        }
+    }
+
+#if 1
+    template<class Ttc, class Ttp, class Tep, class Tsp>
+    inline CountT MakeInteractionListLongEPSPIteration
+        (const ReallocatableArray<Ttc> & tc_first,
+         const S32 adr_tc,
+         const ReallocatableArray<Ttp> & tp_first,
+         const ReallocatableArray<Tep> & ep_first,
+         ReallocatableArray<Tep> & ep_list,
+         const ReallocatableArray<Tsp> & sp_first,
+         ReallocatableArray<Tsp> & sp_list,
+         const F64ort & pos_target_box,
+         const F64 r_crit_sq,
+         const S32 n_leaf_limit){
+        CountT n_cell_open = 0;
+        if( tc_first[adr_tc].n_ptcl_ == 0) return n_cell_open;
+        else if( tc_first[adr_tc].isLeaf(n_leaf_limit) ){
+            S32 adr_ptcl_tmp = tc_first[adr_tc].adr_ptcl_;
+            const S32 n_child = tc_first[adr_tc].n_ptcl_;
+            ep_list.reserveEmptyAreaAtLeast( n_child );
+            sp_list.reserveEmptyAreaAtLeast( n_child );
+            for(S32 ip=0; ip<n_child; ip++){
+                if( GetMSB(tp_first[adr_ptcl_tmp].adr_ptcl_) == 0){
+                    ep_list.pushBackNoCheck(ep_first[adr_ptcl_tmp++]);
+                }
+                else{
+                    sp_list.pushBackNoCheck(sp_first[adr_ptcl_tmp++]);
+                }
+            }
+            return n_cell_open;
+        }
+        //static __thread Stack<S32, 1000> adr_tc_stack;
+	Stack<S32> adr_tc_stack;
+        //static __thread Stack<F64, 1000> r_crit_sq_stack;
+	Stack<F64> r_crit_sq_stack;
+        adr_tc_stack.init();
+        r_crit_sq_stack.init();
+        adr_tc_stack.push(tc_first[adr_tc].adr_tc_);  // push first child
+        r_crit_sq_stack.push(r_crit_sq*0.25);  // push firt child
+        while( !adr_tc_stack.empty() ){
+// root cell has children
+            n_cell_open++;
+            U32 open_bits = 0;
+            const S32 adr_tc_curr = adr_tc_stack.pop();
+            const F64 r_crit_sq_curr = r_crit_sq_stack.pop();
+#ifdef FAST_WALK_K
+            static const _fjsp_v2r8 ZERO = _fjsp_setzero_v2r8();
+            const F64 x_h = pos_target_box.high_.x;
+            const F64 x_l = pos_target_box.low_.x;
+            const F64 y_h = pos_target_box.high_.y;
+            const F64 y_l = pos_target_box.low_.y;
+            const F64 z_h = pos_target_box.high_.z;
+            const F64 z_l = pos_target_box.low_.z;
+            const F64 cen_x = (x_h + x_l) * 0.5;
+            const F64 cen_y = (y_h + y_l) * 0.5;
+            const F64 cen_z = (z_h + z_l) * 0.5;
+            const F64 len_x = (x_h - x_l) * 0.5;
+            const F64 len_y = (y_h - y_l) * 0.5;
+            const F64 len_z = (z_h - z_l) * 0.5;
+            const _fjsp_v2r8 ix = _fjsp_set_v2r8(cen_x, cen_x);
+            const _fjsp_v2r8 iy = _fjsp_set_v2r8(cen_y, cen_y);
+            const _fjsp_v2r8 iz = _fjsp_set_v2r8(cen_z, cen_z);
+            const _fjsp_v2r8 lx = _fjsp_set_v2r8(len_x, len_x);
+            const _fjsp_v2r8 ly = _fjsp_set_v2r8(len_y, len_y);
+            const _fjsp_v2r8 lz = _fjsp_set_v2r8(len_z, len_z);
+            F64 dr_sq[N_CHILDREN];
+            for(S32 i=0; i<N_CHILDREN/2; i++){
+                const S32 i0 = i*2;
+                const S32 i1 = i*2+1;
+                const F64vec & mom0 = tc_first[adr_tc_curr+i0].mom_.getPos();
+                const F64  mom0_x = mom0.x;
+                const F64  mom0_y = mom0.y;
+                const F64  mom0_z = mom0.z;
+                const F64vec & mom1 = tc_first[adr_tc_curr+i1].mom_.getPos();
+                const F64  mom1_x = mom1.x;
+                const F64  mom1_y = mom1.y;
+                const F64  mom1_z = mom1.z;
+                const _fjsp_v2r8 jx = _fjsp_set_v2r8(mom0_x, mom1_x);
+                _fjsp_v2r8 dx = _fjsp_abs_v2r8( _fjsp_sub_v2r8(ix, jx) );
+                dx = _fjsp_sub_v2r8( dx, lx );
+                dx = _fjsp_and_v2r8( dx, _fjsp_cmplt_v2r8(ZERO, dx) );
+
+                const _fjsp_v2r8 jy = _fjsp_set_v2r8(mom0_y, mom1_y);
+                _fjsp_v2r8 dy = _fjsp_abs_v2r8( _fjsp_sub_v2r8(iy, jy) );
+                dy = _fjsp_sub_v2r8( dy, ly );
+                dy = _fjsp_and_v2r8( dy, _fjsp_cmplt_v2r8(ZERO, dy) );
+
+                const _fjsp_v2r8 jz = _fjsp_set_v2r8(mom0_z, mom1_z);
+                _fjsp_v2r8 dz = _fjsp_abs_v2r8( _fjsp_sub_v2r8(iz, jz) );
+                dz = _fjsp_sub_v2r8( dz, lz );
+                dz = _fjsp_and_v2r8( dz, _fjsp_cmplt_v2r8(ZERO, dz) );
+
+                _fjsp_v2r8 dr_sq_tmp = _fjsp_madd_v2r8(dz, dz,
+                                                       _fjsp_madd_v2r8(dy, dy,
+                                                                       _fjsp_mul_v2r8(dx, dx)));
+                _fjsp_storeh_v2r8(dr_sq+i0, dr_sq_tmp);
+                _fjsp_storel_v2r8(dr_sq+i1, dr_sq_tmp);
+            }
+            for(S32 i=0; i<N_CHILDREN; i++){
+                open_bits |= (( dr_sq[i] <= r_crit_sq_curr) << i);
+            }
+#else //FAST_WALK_K
+            for(S32 i=0; i<N_CHILDREN; i++){
+                const F64vec pos_tmp = tc_first[adr_tc_curr+i].mom_.getPos();
+                open_bits |= ( (pos_target_box.getDistanceMinSQ(pos_tmp) <= r_crit_sq_curr) << i);
+            }
+#endif
+            for(S32 i=0; i<N_CHILDREN; i++){
+                const Ttc * tc_curr = tc_first.getPointer(adr_tc_curr+i);
+                const S32 n_child = tc_curr->n_ptcl_;
+                if(n_child == 0) continue;
+                else if( (open_bits>>i) & 0x1 ){
+                    if( !(tc_curr->isLeaf(n_leaf_limit)) ){
+                        adr_tc_stack.push( tc_curr->adr_tc_ );
+                        r_crit_sq_stack.push(r_crit_sq_curr*0.25);
+                    }
+                    else{
+                        S32 adr_ptcl_tmp = tc_curr->adr_ptcl_;
+                        ep_list.reserveEmptyAreaAtLeast( n_child );
+                        sp_list.reserveEmptyAreaAtLeast( n_child );
+                        for(S32 ip=0; ip<n_child; ip++){
+                            if( GetMSB(tp_first[adr_ptcl_tmp].adr_ptcl_) == 0){
+                                ep_list.pushBackNoCheck(ep_first[adr_ptcl_tmp++]);
+                            }
+                            else{
+                                sp_list.pushBackNoCheck(sp_first[adr_ptcl_tmp++]);
+                            }
+                        }
+                    }
+                }
+                else{
+                    sp_list.increaseSize();
+                    sp_list.back().copyFromMoment(tc_curr->mom_);
+                }
+            }
+        }
+        return n_cell_open;
+    }
+#else
+    template<class Ttc, class Ttp, class Tep, class Tsp>
+    inline CountT MakeInteractionListLongEPSPIteration
+        (const ReallocatableArray<Ttc> & tc_first,
+         const S32 adr_tc,
+         const ReallocatableArray<Ttp> & tp_first,
+         const ReallocatableArray<Tep> & ep_first,
+         ReallocatableArray<Tep> & ep_list,
+         const ReallocatableArray<Tsp> & sp_first,
+         ReallocatableArray<Tsp> & sp_list,
+         const F64ort & pos_target_box,
+         const F64 r_crit_sq,
+         const S32 n_leaf_limit){
+
+        CountT n_cell_open = 0;
+        //static __thread Stack<S32, 1000> adr_tc_stack;
+	Stack<S32> adr_tc_stack;
+        //static __thread Stack<F64, 1000> r_crit_sq_stack;
+	Stack<F64> r_crit_sq_stack;
+        adr_tc_stack.init();
+        r_crit_sq_stack.init();
+        adr_tc_stack.push(adr_tc);  // push root cell
+        r_crit_sq_stack.push(r_crit_sq);  // push root cell
+        if( tc_first[adr_tc].n_ptcl_ == 0) return n_cell_open;
+        while( !adr_tc_stack.empty() ){
+            n_cell_open++;
+            S32 adr_tc_curr = adr_tc_stack.pop();
+            F64 r_crit_sq_curr = r_crit_sq_stack.pop();
+            if( tc_first[adr_tc_curr].isLeaf(n_leaf_limit) ){
+                const S32 n_child = tc_first[adr_tc_curr].n_ptcl_;
+                S32 adr_ptcl_tmp = tc_first[adr_tc_curr].adr_ptcl_;
+                ep_list.reserveEmptyAreaAtLeast( n_child );
+                sp_list.reserveEmptyAreaAtLeast( n_child );
+                for(S32 ip=0; ip<n_child; ip++, adr_ptcl_tmp++){
+                    if( GetMSB(tp_first[adr_ptcl_tmp].adr_ptcl_) == 0){
+                        ep_list.pushBackNoCheck(ep_first[adr_ptcl_tmp]);
+                    }
+                    else{
+                        sp_list.pushBackNoCheck(sp_first[adr_ptcl_tmp]);
+                    }
+                }
+            }
+            else{
+                S32 adr_tc_child = tc_first[adr_tc_curr].adr_tc_;
+                const F64 r_crit_sq_child = r_crit_sq_curr * 0.25;
+#ifdef FAST_WALK_K
+                static const _fjsp_v2r8 ZERO = _fjsp_setzero_v2r8();
+                const F64 x_h = pos_target_box.high_.x;
+                const F64 x_l = pos_target_box.low_.x;
+                const F64 y_h = pos_target_box.high_.y;
+                const F64 y_l = pos_target_box.low_.y;
+                const F64 z_h = pos_target_box.high_.z;
+                const F64 z_l = pos_target_box.low_.z;
+                const F64 cen_x = (x_h + x_l) * 0.5;
+                const F64 cen_y = (y_h + y_l) * 0.5;
+                const F64 cen_z = (z_h + z_l) * 0.5;
+                const F64 len_x = (x_h - x_l) * 0.5;
+                const F64 len_y = (y_h - y_l) * 0.5;
+                const F64 len_z = (z_h - z_l) * 0.5;
+                const _fjsp_v2r8 ix = _fjsp_set_v2r8(cen_x, cen_x);
+                const _fjsp_v2r8 iy = _fjsp_set_v2r8(cen_y, cen_y);
+                const _fjsp_v2r8 iz = _fjsp_set_v2r8(cen_z, cen_z);
+                const _fjsp_v2r8 lx = _fjsp_set_v2r8(len_x, len_x);
+                const _fjsp_v2r8 ly = _fjsp_set_v2r8(len_y, len_y);
+                const _fjsp_v2r8 lz = _fjsp_set_v2r8(len_z, len_z);
+                F64 dr_sq[N_CHILDREN];
+                for(S32 i=0; i<N_CHILDREN/2; i++){
+                    const S32 i0 = i*2;
+                    const S32 i1 = i*2+1;
+                    const F64vec & mom0 = tc_first[adr_tc_child+i0].mom_.getPos();
+                    const F64  mom0_x = mom0.x;
+                    const F64  mom0_y = mom0.y;
+                    const F64  mom0_z = mom0.z;
+                    const F64vec & mom1 = tc_first[adr_tc_child+i1].mom_.getPos();
+                    const F64  mom1_x = mom1.x;
+                    const F64  mom1_y = mom1.y;
+                    const F64  mom1_z = mom1.z;
+                    const _fjsp_v2r8 jx = _fjsp_set_v2r8(mom0_x, mom1_x);
+                    _fjsp_v2r8 dx = _fjsp_abs_v2r8( _fjsp_sub_v2r8(ix, jx) );
+                    dx = _fjsp_sub_v2r8( dx, lx );
+                    dx = _fjsp_and_v2r8( dx, _fjsp_cmplt_v2r8(ZERO, dx) );
+
+                    const _fjsp_v2r8 jy = _fjsp_set_v2r8(mom0_y, mom1_y);
+                    _fjsp_v2r8 dy = _fjsp_abs_v2r8( _fjsp_sub_v2r8(iy, jy) );
+                    dy = _fjsp_sub_v2r8( dy, ly );
+                    dy = _fjsp_and_v2r8( dy, _fjsp_cmplt_v2r8(ZERO, dy) );
+                    
+                    const _fjsp_v2r8 jz = _fjsp_set_v2r8(mom0_z, mom1_z);
+                    _fjsp_v2r8 dz = _fjsp_abs_v2r8( _fjsp_sub_v2r8(iz, jz) );
+                    dz = _fjsp_sub_v2r8( dz, lz );
+                    dz = _fjsp_and_v2r8( dz, _fjsp_cmplt_v2r8(ZERO, dz) );
+
+                    _fjsp_v2r8 dr_sq_tmp = _fjsp_madd_v2r8(dz, dz,
+                                                           _fjsp_madd_v2r8(dy, dy,
+                                                                           _fjsp_mul_v2r8(dx, dx)));
+                    _fjsp_storeh_v2r8(dr_sq+i0, dr_sq_tmp);
+                    _fjsp_storel_v2r8(dr_sq+i1, dr_sq_tmp);
+                }
+                for(S32 i=0; i<N_CHILDREN; i++, adr_tc_child++){
+                    if(tc_first[adr_tc_child].n_ptcl_ == 0) continue;
+                    else if( dr_sq[i] <= r_crit_sq_child ){
+                        adr_tc_stack.push(adr_tc_child);
+                        r_crit_sq_stack.push(r_crit_sq_child);
+                    }
+                    else{
+                        sp_list.increaseSize();
+                        sp_list.back().copyFromMoment(tc_first[adr_tc_child].mom_);
+                    }
+                }
+#else //FAST_WALK_K
+                for(S32 i=0; i<N_CHILDREN; i++, adr_tc_child++){
+                    if(tc_first[adr_tc_child].n_ptcl_ == 0) continue;
+                    const F64vec pos_tmp = tc_first[adr_tc_child].mom_.getPos();
+                    if( pos_target_box.getDistanceMinSQ(pos_tmp) <= r_crit_sq_child ){
+                        adr_tc_stack.push(adr_tc_child);
+                        r_crit_sq_stack.push(r_crit_sq_child);
+                    }
+                    else{
+                        sp_list.increaseSize();
+                        sp_list.back().copyFromMoment(tc_first[adr_tc_child].mom_);
+                    }
+                }
+#endif //FAST_WALK_K
+            }
+        }
+        return n_cell_open;
+    }
+#endif
+
 }
